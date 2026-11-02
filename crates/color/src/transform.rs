@@ -10,6 +10,11 @@
 //! (only when an HDR or log source enters an SDR working space and Auto Tone Map is on) → gamut
 //! compression (only when the source gamut is wider than the working gamut).
 //!
+//! HLG entering an SDR working space with Auto Tone Map on is instead rendered for an SDR display
+//! (the backwards-compatible way HLG is meant to be shown): the OOTF uses the system gamma for a
+//! [`SDR_DISPLAY_NITS`] peak ([`hlg_system_gamma`], γ ≈ 0.846), HLG 100 % lands on SDR white and no
+//! BT.2390 stage follows. This matches Apple's own SDR rendering of iPhone HLG footage.
+//!
 //! **Output** ([`OutputTransform`]): working linear → display-referred SDR BT.709 for monitors
 //! (tone mapping from HDR working spaces, gamut mapping from wide gamut), or → encoded PQ/HLG
 //! signal for HDR exports. Out-of-gamut colours there are desaturated towards their luminance
@@ -33,6 +38,14 @@ pub const REFERENCE_WHITE_NITS: f64 = 203.0;
 /// without metadata.
 pub const HDR_PEAK_NITS: f64 = 1000.0;
 const HLG_GAMMA: f64 = 1.2;
+/// Peak of the SDR display HLG is rendered for when it enters an SDR working space.
+pub const SDR_DISPLAY_NITS: f64 = 100.0;
+
+/// HLG system gamma for a display of peak `lw` cd/m², extended form valid below 400 cd/m²
+/// (ITU-R BT.2390, as implemented by libplacebo and libjxl): γ = 1.2 · 1.111^log2(lw / 1000).
+pub fn hlg_system_gamma(lw: f64) -> f64 {
+    HLG_GAMMA * 1.111_f64.powf((lw / HDR_PEAK_NITS).log2())
+}
 /// Source peak assumed when tone mapping log media: the curve's own peak, capped here so the
 /// BT.2390 knee starts above mid grey (≈ 45 cd/m², i.e. 0.22 in working units).
 pub const LOG_PEAK_NITS: f64 = 4000.0;
@@ -191,8 +204,8 @@ pub struct InputTransform {
     pub table: DecodeTable,
     matrix: [[f32; 3]; 3],
     identity_matrix: bool,
-    /// HLG OOTF luma weights (BT.2020) and the scale to working units.
-    hlg: Option<([f32; 3], f32)>,
+    /// HLG OOTF: luma weights (BT.2020), the scale to working units and the exponent γ − 1.
+    hlg: Option<([f32; 3], f32, f32)>,
     tone: Option<ToneMap>,
     compress: bool,
     /// Display-referred wide-gamut media (BT.2020 / P3 / HDR): desaturate into the working gamut
@@ -207,9 +220,12 @@ impl InputTransform {
         let wg = pipe.working_gamut();
         let m = gamut_matrix(src.gamut(), wg);
         let identity_matrix = src.gamut() == wg;
+        // HLG into SDR with Auto Tone Map: render for an SDR display (scale 1.0 = SDR white), no EETF
+        let hlg_to_sdr = curve == Curve::Hlg && !pipe.working.is_hdr() && pipe.auto_tone_map;
         let hlg = (curve == Curve::Hlg).then(|| {
             let l = Gamut::Bt2020.luma();
-            ([l[0] as f32, l[1] as f32, l[2] as f32], (HDR_PEAK_NITS / REFERENCE_WHITE_NITS) as f32)
+            let (scale, gamma) = if hlg_to_sdr { (1.0, hlg_system_gamma(SDR_DISPLAY_NITS)) } else { (HDR_PEAK_NITS / REFERENCE_WHITE_NITS, HLG_GAMMA) };
+            ([l[0] as f32, l[1] as f32, l[2] as f32], scale as f32, (gamma - 1.0) as f32)
         });
         let peak = match curve {
             Curve::Pq => src_peak_nits.unwrap_or(HDR_PEAK_NITS).clamp(REFERENCE_WHITE_NITS, 10_000.0),
@@ -217,7 +233,7 @@ impl InputTransform {
             Curve::Log(c) => (c.peak_linear() * REFERENCE_WHITE_NITS).clamp(REFERENCE_WHITE_NITS, LOG_PEAK_NITS),
             _ => REFERENCE_WHITE_NITS,
         };
-        let tone = (src.is_hdr() && !pipe.working.is_hdr() && pipe.auto_tone_map).then(|| ToneMap::new(peak, REFERENCE_WHITE_NITS));
+        let tone = (src.is_hdr() && !pipe.working.is_hdr() && pipe.auto_tone_map && !hlg_to_sdr).then(|| ToneMap::new(peak, REFERENCE_WHITE_NITS));
         let wider = !identity_matrix && !gamut_within(src.gamut(), wg);
         // camera gamuts (log media) get the soft compression; display gamuts keep their in-gamut
         // colours exactly (BT.709 content in a BT.2020 file comes back unchanged)
@@ -235,9 +251,10 @@ impl InputTransform {
     /// The per-pixel stage (input: the table's output).
     #[inline]
     pub fn apply(&self, mut c: [f32; 3]) -> [f32; 3] {
-        if let Some((l, k)) = self.hlg {
+        if let Some((l, k, e)) = self.hlg {
             let ys = (l[0] * c[0] + l[1] * c[1] + l[2] * c[2]).max(0.0);
-            let g = k * ys.powf((HLG_GAMMA - 1.0) as f32);
+            // the exponent is negative for an SDR display: black stays black instead of 0 · ∞
+            let g = if ys > 0.0 { k * ys.powf(e) } else { 0.0 };
             c = c.map(|v| v * g);
         }
         if !self.identity_matrix {
@@ -299,8 +316,8 @@ pub enum GpuCurve {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuInputParams {
     pub curve: GpuCurve,
-    /// HLG OOTF: BT.2020 luma weights and the scale to working units.
-    pub hlg: Option<([f32; 3], f32)>,
+    /// HLG OOTF: BT.2020 luma weights, the scale to working units and the exponent γ − 1.
+    pub hlg: Option<([f32; 3], f32, f32)>,
     /// Into the working primaries (row-major), when they differ.
     pub matrix: Option<[[f32; 3]; 3]>,
     /// BT.2390 tone mapping (source peak, target peak) in cd/m², on max(R,G,B) as a ratio.
@@ -517,7 +534,11 @@ mod tests {
         let hlg = p(ColorSpace::Rec2100Hlg).unwrap();
         assert_eq!(hlg.curve, GpuCurve::Hlg);
         assert!(hlg.hlg.is_some() && hlg.matrix.is_some() && hlg.desaturate.is_some());
-        assert_eq!(hlg.tone, Some((HDR_PEAK_NITS as f32, REFERENCE_WHITE_NITS as f32)));
+        // HLG into SDR is rendered for an SDR display: OOTF with γ ≈ 0.846, no BT.2390 stage
+        assert_eq!(hlg.tone, None);
+        let (_, k, e) = hlg.hlg.unwrap();
+        assert_eq!(k, 1.0);
+        assert!((e - (hlg_system_gamma(SDR_DISPLAY_NITS) - 1.0) as f32).abs() < 1e-6);
         let pq = InputTransform::new(ColorSpace::Rec2100Pq, Range::Limited, &ColorPipeline::REC709, Some(4000.0)).gpu_params().unwrap();
         assert_eq!((pq.curve, pq.hlg, pq.tone), (GpuCurve::Pq, None, Some((4000.0, REFERENCE_WHITE_NITS as f32))));
         let sdr2020 = p(ColorSpace::Rec2020).unwrap();
@@ -549,5 +570,39 @@ mod tests {
         assert!((hi[0] - 1.0).abs() < 0.01);
         // plain pipeline is an identity
         assert!(OutputTransform::display(&ColorPipeline::REC709).is_identity());
+    }
+
+    #[test]
+    fn hlg_into_rec709_matches_apple_sdr_rendering() {
+        // Handoff pattern (filmcraft-hlg-repro): full-range HLG signal → AVFoundation's SDR output,
+        // mean 8-bit sRGB. Before this mapping, main overshot by up to 73 codes at 70 %.
+        assert!((hlg_system_gamma(SDR_DISPLAY_NITS) - 0.8459).abs() < 1e-3);
+        let t = InputTransform::new(ColorSpace::Rec2100Hlg, Range::Full, &ColorPipeline::REC709, None);
+        let code = |rgb: [f32; 3]| t.convert(rgb).map(|v| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as i32);
+        let grey = [(0.1, 23), (0.2, 45), (0.3, 65), (0.4, 81), (0.5, 98), (0.6, 116), (0.7, 140), (0.8, 172), (0.9, 209), (1.0, 253)];
+        for (v, apple) in grey {
+            let c = code([v; 3]);
+            assert!(c.iter().all(|x| (x - apple).abs() <= 3), "HLG {v}: {c:?} vs Apple {apple}");
+        }
+        let patches = [
+            ("skin", [0.68, 0.55, 0.47], [154, 97, 89]),
+            ("lit_skin", [0.81, 0.71, 0.56], [195, 134, 88]),
+            ("foliage", [0.40, 0.52, 0.30], [61, 103, 53]),
+            ("denim", [0.28, 0.31, 0.45], [49, 62, 92]),
+            ("bark", [0.76, 0.75, 0.71], [161, 152, 136]),
+            ("warm_hilite", [0.94, 0.86, 0.74], [252, 183, 131]),
+        ];
+        for (name, rgb, apple) in patches {
+            let c = code(rgb);
+            assert!(c.iter().zip(apple).all(|(x, a)| (x - a).abs() <= 8), "{name}: {c:?} vs Apple {apple:?}");
+        }
+        // black stays black (negative OOTF exponent), never NaN
+        assert_eq!(t.convert([0.0; 3]), [0.0; 3]);
+        // HLG in an HDR working space and with Auto Tone Map off keep the BT.2408 placement
+        let off = ColorPipeline { auto_tone_map: false, ..ColorPipeline::REC709 };
+        for pipe in [hdr(WorkingSpace::Rec2100Hlg), off] {
+            let w = InputTransform::new(ColorSpace::Rec2100Hlg, Range::Full, &pipe, None).convert([0.75; 3]);
+            assert!((w[0] - 1.0).abs() < 0.03, "{w:?}");
+        }
     }
 }
