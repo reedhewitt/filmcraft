@@ -176,7 +176,7 @@ no media outside its range, so there a kept In is moved to the subclip's first o
 the result's `sourceInClamped: [ids]` (present with `keepSourceIn`) names the clips it was moved for.
 
 **Colour** (`crates/engine/src/color.rs`): `sequence.colorSettings {workingSpace: rec709|rec2100-pq|
-rec2100-hlg, wideGamut, autoToneMap}`, `clip.interpretFootage {items?, colorSpace?: auto|<id>, pixelAspect?: [num, den]|file}`,
+rec2100-hlg, wideGamut, autoToneMap, hlgSdr?: ootf|bt2446}`, `clip.interpretFootage {items?, colorSpace?: auto|<id>, pixelAspect?: [num, den]|file}`,
 `color.spaces`, `media.colorInfo {item}`; LUTs: `lut.import {path, name?}`, `lut.list`,
 `lut.remove {id}`, `lut.export {lut, path, format?}`, `lumetri.setInputLut` / `lumetri.setLook
 {clip?, lut: lib:<id>|builtin:<id>|"", path?}`, `lumetri.setSection {clip?, section, on?}`,
@@ -187,7 +187,7 @@ result's `leftOut` names what a LUT cannot hold: vignette, sharpen, HSL Secondar
 and the clip's other effects; Rec. 709 sequences without wide gamut only; the Color Grading panel menu
 entry `panel.menu.LumetriColor.exportCube` asks for the path). Without
 params the menu entries open dialogs (ids `colorDialog.space.<id>`, `colorDialog.working.<id>`,
-`colorDialog.wideGamut`, `colorDialog.autoToneMap`, `colorDialog.ok|cancel`). Color Grading panel ids:
+`colorDialog.wideGamut`, `colorDialog.autoToneMap`, `colorDialog.hlgSdr.<id>`, `colorDialog.ok|cancel`). Color Grading panel ids:
 `lumetri.input_lut`, `lumetri.look_lut`, `lumetri.switch.<section>`, `lumetri.section.<section>`,
 `lumetri.match.*`; HDR scopes: `scopes.hdrWaveform`. `file.exportMedia {sdr: true}` exports an HDR
 sequence as tone-mapped SDR.
