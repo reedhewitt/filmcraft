@@ -97,7 +97,7 @@ fn source_program_layer_plan_and_sdr_exports_agree() {
     // conversion), rather than the brighter ~54% / 90% of the old 1000-nit mapping.
     assert!(source[(16 * W as usize + 80) * 4].abs_diff(98) <= 1);
     assert!(source[(16 * W as usize + 112) * 4].abs_diff(154) <= 1);
-    let plan = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, RenderOptions::default(), &map);
+    let plan = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, RenderOptions::default(), filmcraft_render::plan::DeviceCaps::ALL, &map);
     let filmcraft_render::plan::FramePlan::Layers { layers, .. } = &plan else { panic!("HLG keeps the GPU layer path") };
     assert!(layers[0].input.is_some());
     assert_eq!(filmcraft_render::plan::execute_cpu(&plan).over_black_rgba8(), program, "layer plan: same conversion");
